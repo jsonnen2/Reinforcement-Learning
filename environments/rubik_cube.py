@@ -6,6 +6,7 @@ another would connect each piece. So there would be 20 unique game objects.'''
 
 
 import numpy as np
+import pygame
 
 # RGB color values
 COLOR = [(0, 0, 255),      # Blue
@@ -16,15 +17,33 @@ COLOR = [(0, 0, 255),      # Blue
           (255, 255, 0)]    # Yellow
 COLOR = np.array(COLOR)
 
+screen = None
+
+
 def render_flat(rubik: np.ndarray, wait: int = 3000):
-    import pygame
-    pygame.init()
-    screen = pygame.display.set_mode((270,360))
+    '''
+    Display the rubik's cube "unpacked" in a pygame window.
+    The cube is flattened to show each face at once.
+    My numpy matrices are all orientated such that (0,0) occurs at the upper-left tile of this flattened cube.
+    
+       [ ]
+    [ ][ ][ ]
+       [ ]
+       [ ]
+    '''
+    cube_size = 90
+    global screen
+    if screen is None:
+        pygame.init()
+        screen = pygame.display.set_mode((3*cube_size, 4*cube_size))
+
     screen.fill((245, 245, 220)) # beige background
 
-    s = 90
-    coords = [(s,0), (0,s), (s,s), (2*s,s), (s,2*s), (s,3*s)]
-    coords = np.array(coords)
+    coords = np.array([
+        [cube_size,0], [0,cube_size], 
+        [cube_size,cube_size], [2*cube_size,cube_size], 
+        [cube_size,2*cube_size], [cube_size,3*cube_size],
+    ])
     face_size = np.array([90,90])
     tile_size = face_size // rubik.shape[1]
     BLACK = (0,0,0)
@@ -46,18 +65,22 @@ def render_flat(rubik: np.ndarray, wait: int = 3000):
     
     pygame.display.update()
     pygame.time.wait(wait)
-    pygame.quit()
 
 
-def rubik_starting_pos(n: int) -> np.array:
+def rubik_starting_pos(n: int) -> np.ndarray:
     rubik = np.zeros((6, n, n), dtype=int)
     for idx in range(6):
         face = np.full((n,n), idx)
         rubik[idx] = face
     return rubik
 
-
-
+def rubik_cube_scrambled(n: int, scramble=40) -> np.ndarray:
+    '''perform random actions on a solved rubik cube'''
+    rubik = rubik_starting_pos(n)
+    for _ in range(scramble):
+        action = np.random.randint(0, 6*n)
+        rubik = step(rubik, action)
+    return rubik
 
 def step(rubik: np.ndarray, action: int) -> np.ndarray:
     '''
@@ -80,76 +103,89 @@ def step(rubik: np.ndarray, action: int) -> np.ndarray:
 
     assert rubik.shape[1] == rubik.shape[2]
     n = rubik.shape[1]
-    # (circle #, row, forwards/backwards)
-    action = (action // (2*n), (action%(2*n))//2, action%2)     
+    great_circle = action // (2*n)
+    row = (action % (2*n) // 2)
     '''
     # clockwise (cw) and ccw are a matter of perspective.
     # So I use forewards and backwards with respect to this ordering
-    # even is forward. odd is backward.'''
+    # even actions are forwards. odd are backwards.'''
     circle_paths = np.array([
         [2,4,5,0],
         [2,3,5,1],
         [4,3,0,1],
     ])
-
-    row = action[1]
+    # row exists in set [0, n-1]. 
+    # It describes which row of the great circle to rotate
+    # these coordinates are in reference to face 2 
     starting_pos = np.array([
         [(row, i) for i in range(n)],
         [(i, row) for i in range(n)],
         [(i, row) for i in range(n)],
     ])
 
-    def rot0(x,y):
-        return (x,y)
-    def rot90(x,y):
-        return (y, (n-1)-x)
-    def rot180(x,y):
-        return ((n-1)-x, (n-1)-y)
-    def rot270(x,y):
-        return ((n-1)-y, x)
+    def rot0(arr):
+        return arr
+    def rot90(arr):
+        x = (n-1)-arr[:,0]
+        y = arr[:,1]
+        return np.stack((y, x), axis=1)
+    def rot180(arr):
+        x = (n-1)-arr[:,0]
+        y = (n-1)-arr[:,1]
+        return np.stack((x,y), axis=1)
+    def rot270(arr):
+        x = arr[:,0]
+        y = (n-1)-arr[:,1]
+        return np.stack((y,x), axis=1)
 
     circle_functs = [
         [rot0, rot0, rot0, rot0],
         [rot0, rot0, rot180, rot0],
         [rot0, rot90, rot180, rot270],
     ]
-    start = starting_pos[action[0]]
-    functions = circle_functs[action[0]]
-    swap_tuples = np.array([[f(x,y) for x,y in start] for f in functions])
+    start = starting_pos[great_circle]
+    functions = circle_functs[great_circle]
+    swap_tuples = np.array([f(start) for f in functions])
 
-    # Add a dimension to the tuples describing its face. 
-    face_dim = np.repeat(circle_paths[action[0]][:, np.newaxis], n, axis=1).reshape(4,n,1)
+    '''
+    the swap_tuples data are missing an axis to describe which face of the cube it belongs to.
+    this data describes a rotation along 1 of 3 great circles.
+    I can use circle_paths to give me the correct face.''' 
+    face_dim = np.repeat(circle_paths[great_circle][:, np.newaxis], n, axis=1).reshape(4,n,1)
     move_arr = np.concatenate((face_dim, swap_tuples), axis=2)
     copied_tiles = np.copy([rubik[*tile] for tile in move_arr[0]])
     '''
     perform the axis rotation along a line of pieces.
-    this code block rotates all pieces not on the plane of rotation.'''
-    order = np.array([[3,0,-1], [1,4,1]])
-    shift = 2*action[2] - 1
-    for f in range(*order[action[2]]):
+    this code block rotates all pieces not on the plane of rotation.
+    '''
+    order = np.array([[3,0,-1], [1,4,1]]) # for loop indices 
+    parity = action % 2     # is action even or odd?
+    shift = 2*parity - 1    # even = +1  ;  odd = -1
+    '''shift the source data into the target indices on the rubik's cube'''
+    for f in range(*order[parity]):
         target = move_arr[(f-shift)%4]
-        new_tiles = move_arr[f]
+        source = move_arr[f]
         for idx in range(n):
-            rubik[*target[idx]] = rubik[*new_tiles[idx]]
+            rubik[*target[idx]] = rubik[*source[idx]]
     for idx in range(n):
-        rubik[*new_tiles[idx]] = copied_tiles[idx]
+        rubik[*source[idx]] = copied_tiles[idx]
 
     # rotate the face of the cube when neccessary
-    if action[1] == 0 or action[1] == n-1:
+    if row == 0 or row == n-1:
         face_rotation_ref = np.array([[1, 3], [0, 4], [2, 5]])
-        face = face_rotation_ref[action[0], action[1] // (n-1)]
+        face = face_rotation_ref[great_circle, row // (n-1)]
         rubik[face] = np.rot90(rubik[face])
 
     return rubik
 
+
 if __name__ == '__main__':
-    N = 4
+    N = 3
     rubik = rubik_starting_pos(N)
-    rubik = step(rubik, 0)
-    render_flat(rubik, 3_000)
-    rubik = step(rubik, 8)
-    render_flat(rubik, 3_000)
-    rubik = step(rubik, 0)
-    render_flat(rubik, 3_000)
-    rubik = step(rubik, 8)
-    render_flat(rubik, 3_000)
+    
+    import time
+    start=time.time()
+    for _ in range(100_000):
+        action = np.random.randint(0, 18)
+        rubik = step(rubik, action)
+    print(time.time() - start)
